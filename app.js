@@ -11,6 +11,20 @@ const LOG_FILE_PATH = path.join(__dirname, 'public', 'logs.json');
 app.use(express.urlencoded({ extended: true }));
 app.use('/public', express.static(path.join(__dirname, 'public')));
 
+// Helper function to safely get nested values
+function getSafe(obj, pathArray, defaultValue = null) {
+  if (!obj || typeof obj !== 'object') return defaultValue;
+  let current = obj;
+  for (const key of pathArray) {
+    if (current && typeof current === 'object' && key in current) {
+      current = current[key];
+    } else {
+      return defaultValue;
+    }
+  }
+  return current;
+}
+
 async function appendLog(logEntry) {
   try {
     let logs = [];
@@ -287,15 +301,15 @@ button:hover, input[type="submit"]:hover {
 `;
 
 const capitalize = (str) => str.charAt(0).toUpperCase() + str.slice(1);
+
 const getDomainName = (req) => {
   try {
-    const url = `${req.protocol}://${req.get('host')}`;
+    const url = `${req.protocol}://${req.host}`;
     const { hostname } = new URL(url);
     const cleanHost = hostname.replace(/^www\./, '');
     const parts = cleanHost.split('.');
-    if (parts.length === 1) return capitalize(parts[0]);
     if (parts.length === 2) return capitalize(parts[0]);
-    return parts.slice(0, -2).map(capitalize).join(' ');
+    return parts.slice(0, -2).map(capitalize).join(' ') + ' ' + capitalize(parts[parts.length - 2]);
   } catch (error) {
     return 'Webhook';
   }
@@ -355,6 +369,9 @@ function getLogsViewHTML(req, logs = []) {
             <h3>Status: ${log.status}</h3>
             ${log.projectName ? `<p><strong>Project:</strong> ${log.projectName}</p>` : ''}
             ${log.branchName ? `<p><strong>Branch:</strong> ${log.branchName}</p>` : ''}
+            ${log.eventType ? `<p><strong>Event Type:</strong> ${log.eventType}</p>` : ''}
+            ${log.committer ? `<p><strong>Committer:</strong> ${log.committer}</p>` : ''}
+            ${log.commitHash ? `<p><strong>Commit:</strong> <a href="#" title="${log.commitHash}">${log.commitHash.substring(0, 7)}...</a></p>` : ''} 
             <p><strong>Message:</strong> ${log.message}</p>
             ${log.details && Object.keys(log.details).length > 0 ? 
               `<p><strong>Details:</strong></p><pre>${JSON.stringify(log.details, null, 2)}</pre>` : ''}
@@ -451,7 +468,11 @@ app.use(express.json({
 
 app.post('/', (req, res) => {
   const githubSignature = req.get('X-Hub-Signature-256');
+  const gitlabToken = req.get('X-Gitlab-Token');
+  const giteaSignature = req.get('X-Gitea-Signature'); // Common for Gitea, but might vary
+
   const localSecret = process.env.GIT_SECRET;
+  const body = req.body;
 
   if (!req.rawBody) {
     console.warn('Request received without rawBody. Ensure that Content-Type is application/json.');
@@ -461,40 +482,131 @@ app.post('/', (req, res) => {
 
   if (!localSecret) {
     console.error('Error: GIT_SECRET is not configured on the server.');
-    appendLog({ timestamp: new Date().toISOString(), status: 'CONFIGURATION_ERROR', message: 'GIT_SECRET is not configured.', details: { project: req.body?.repository?.name || 'N/A' } });
+    appendLog({ 
+        timestamp: new Date().toISOString(), 
+        status: 'CONFIGURATION_ERROR', 
+        message: 'GIT_SECRET is not configured.', 
+        details: { project: getSafe(body, ['repository','name']) || getSafe(body, ['project','name']) || 'N/A' }
+    });
     return res.status(500).send({ error: 'Internal Server Configuration Error' });
   }
 
-  if (!githubSignature) {
-    console.warn('Request received without X-Hub-Signature-256 header.');
-    appendLog({ timestamp: new Date().toISOString(), status: 'VALIDATION_ERROR', message: 'Request received without X-Hub-Signature-256 header.', details: { project: req.body?.repository?.name || 'N/A', remoteAddress: req.ip } });
+  let signatureToVerify = githubSignature;
+  let source = 'GitHub'; // Assume GitHub by default
+
+  if (gitlabToken) {
+    signatureToVerify = gitlabToken; // GitLab uses a token directly, not HMAC in the same way for 'secret'
+    source = 'GitLab';
+  } else if (giteaSignature) {
+    signatureToVerify = giteaSignature;
+    source = 'Gitea';
+  } // If neither, it's likely GitHub or a similar HMAC-based system
+
+  if (!signatureToVerify && source !== 'GitLab') { // GitLab might not send a signature if secret isn't set on GitLab side
+    console.warn(`Request received from potential source ${source} without X-Hub-Signature-256 or equivalent header.`);
+    appendLog({ 
+        timestamp: new Date().toISOString(), 
+        status: 'VALIDATION_ERROR', 
+        message: 'Request received without signature header.', 
+        details: { project: getSafe(body, ['repository','name']) || getSafe(body, ['project','name']) || 'N/A', remoteAddress: req.ip, source }
+    });
     return res.status(401).send({ error: 'No signature provided. Access denied.' });
   }
 
-  const hmac = crypto.createHmac('sha256', localSecret);
-  hmac.update(req.rawBody);
-  const expectedSignature = `sha256=${hmac.digest('hex')}`;
-
-  try {
-    if (!crypto.timingSafeEqual(Buffer.from(githubSignature), Buffer.from(expectedSignature))) {
-      console.warn('Invalid webhook signature.');
-      appendLog({ timestamp: new Date().toISOString(), status: 'VALIDATION_ERROR', message: 'Invalid webhook signature.', details: { project: req.body?.repository?.name || 'N/A', remoteAddress: req.ip, providedSignature: githubSignature } });
-      return res.status(401).send({ error: 'Invalid signature. Access denied.' });
+  // Signature validation logic
+  if (source === 'GitHub' || source === 'Gitea') {
+    const hmac = crypto.createHmac('sha256', localSecret);
+    hmac.update(req.rawBody);
+    const expectedSignature = `sha256=${hmac.digest('hex')}`;
+    try {
+      if (!crypto.timingSafeEqual(Buffer.from(signatureToVerify), Buffer.from(expectedSignature))) {
+        console.warn(`Invalid webhook signature from ${source}.`);
+        appendLog({ 
+            timestamp: new Date().toISOString(), 
+            status: 'VALIDATION_ERROR', 
+            message: 'Invalid webhook signature.', 
+            details: { project: getSafe(body,['repository','name']) || getSafe(body, ['project','name']) || 'N/A', remoteAddress: req.ip, providedSignature: signatureToVerify, source }
+        });
+        return res.status(401).send({ error: 'Invalid signature. Access denied.' });
+      }
+    } catch (error) {
+      console.warn(`Error comparing signatures for ${source} (possibly incompatible formats):`, error.message);
+      appendLog({ 
+          timestamp: new Date().toISOString(), 
+          status: 'VALIDATION_ERROR', 
+          message: 'Error comparing signatures.', 
+          details: { project: getSafe(body,['repository','name']) || getSafe(body, ['project','name']) || 'N/A', remoteAddress: req.ip, error: error.message, source }
+      });
+      return res.status(401).send({ error: 'Invalid signature format. Access denied.' });
     }
-  } catch (error) {
-    console.warn('Error comparing signatures (possibly incompatible formats):', error.message);
-    appendLog({ timestamp: new Date().toISOString(), status: 'VALIDATION_ERROR', message: 'Error comparing signatures.', details: { project: req.body?.repository?.name || 'N/A', remoteAddress: req.ip, error: error.message } });
-    return res.status(401).send({ error: 'Invalid signature format. Access denied.' });
+  } else if (source === 'GitLab') {
+    if (signatureToVerify !== localSecret) {
+      console.warn('Invalid X-Gitlab-Token.');
+      appendLog({ 
+          timestamp: new Date().toISOString(), 
+          status: 'VALIDATION_ERROR', 
+          message: 'Invalid GitLab token.', 
+          details: { project: getSafe(body,['repository','name']) || getSafe(body, ['project','name']) || 'N/A', remoteAddress: req.ip, source }
+      });
+      return res.status(401).send({ error: 'Invalid token. Access denied.' });
+    }
   }
 
-  const projectName = req.body.repository.name;
-  const pushedBranchWithRef = req.body.ref;
+  // Extract common information
+  const projectName = getSafe(body, ['repository', 'name'])
+                     || getSafe(body, ['project', 'name'])
+                     || getSafe(body, ['repository', 'full_name'])
+                     || getSafe(body, ['project', 'path_with_namespace']);
+
+  const pushedBranchWithRef = getSafe(body, ['ref']);
+  
+  let commits = getSafe(body, ['commits'], []);
+  if (!Array.isArray(commits) || commits.length === 0) {
+    const headCommit = getSafe(body, ['head_commit']);
+    if (headCommit) commits = [headCommit]; // Standardize to array
+  }
+
+  let committerName = 'N/A';
+  let commitHash = 'N/A';
+  let eventType = 'Push'; // Default to Push, can be refined to Commit/Merge
+  let commitMessage = '';
+
+  if (commits && commits.length > 0) {
+    const lastCommit = commits[commits.length - 1]; // Process the last commit in the push
+    commitHash = getSafe(lastCommit, ['id'])
+                 || getSafe(lastCommit, ['sha']) 
+                 || 'N/A';
+    commitMessage = getSafe(lastCommit, ['message'], '');
+
+    committerName = getSafe(lastCommit, ['committer', 'name'])
+                    || getSafe(lastCommit, ['author', 'name'])
+                    || getSafe(body, ['pusher', 'name'])
+                    || getSafe(body, ['user_name']) // GitLab pusher
+                    || getSafe(body, ['pusher', 'login'])
+                    || 'N/A';
+
+    // Try to determine if it's a merge commit
+    const parents = getSafe(lastCommit, ['parents']);
+    if (Array.isArray(parents) && parents.length > 1) {
+      eventType = 'Merge';
+    } else if (commitMessage.toLowerCase().startsWith('merge branch') || commitMessage.toLowerCase().startsWith('merge pull request')) {
+      eventType = 'Merge';
+    } else {
+      eventType = 'Commit';
+    }
+  } else {
+      // Fallback for pusher name if no commit data (e.g. new branch creation without commits in payload immediately)
+      committerName = getSafe(body, ['pusher', 'name'])
+                    || getSafe(body, ['user_name'])
+                    || getSafe(body, ['pusher', 'login'])
+                    || 'N/A';
+  }
 
   if (!pushedBranchWithRef) {
-    appendLog({ timestamp: new Date().toISOString(), status: 'VALIDATION_ERROR', projectName, message: 'Branch reference (req.body.ref) not found in request body.' });
-    return res.status(400).send({ error: 'Branch reference (req.body.ref) not found in request body.' });
+    appendLog({ timestamp: new Date().toISOString(), status: 'VALIDATION_ERROR', projectName, committer: committerName, commitHash, eventType, message: 'Branch reference (ref) not found in request body.' });
+    return res.status(400).send({ error: 'Branch reference (ref) not found in request body.' });
   }
-  const pushedBranchName = pushedBranchWithRef.replace('refs/heads/', '');
+  const pushedBranchName = pushedBranchWithRef.replace('refs/heads/', '').replace('refs/tags/', '');
 
   let allowedBranches = req.query.refs || [];
   if (typeof allowedBranches === 'string') {
@@ -502,14 +614,14 @@ app.post('/', (req, res) => {
   }
 
   if (!projectName) {
-    appendLog({ timestamp: new Date().toISOString(), status: 'VALIDATION_ERROR', projectName: 'N/A', branchName: pushedBranchName, message: 'Project name not found in request body after signature validation' });
+    appendLog({ timestamp: new Date().toISOString(), status: 'VALIDATION_ERROR', projectName: 'N/A', branchName: pushedBranchName, committer: committerName, commitHash, eventType, message: 'Project name not found in request body after signature validation' });
     return res.status(400).send({ error: 'Project name not found in request body after signature validation' });
   }
 
   if (allowedBranches.length > 0 && !allowedBranches.includes(pushedBranchName)) {
-    const message = `Push to branch '${pushedBranchName}' for project '${projectName}' ignored. Not in allowed list: [${allowedBranches.join(', ')}].`;
+    const message = `Push to branch '${pushedBranchName}' for project '${projectName}' (commit: ${commitHash.substring(0,7)}, by: ${committerName}, type: ${eventType}) ignored. Not in allowed list: [${allowedBranches.join(', ')}].`;
     console.log(message);
-    appendLog({ timestamp: new Date().toISOString(), status: 'IGNORED', projectName, branchName: pushedBranchName, message, details: { allowedBranches } });
+    appendLog({ timestamp: new Date().toISOString(), status: 'IGNORED', projectName, branchName: pushedBranchName, committer: committerName, commitHash, eventType, message, details: { allowedBranches } });
     return res.status(200).send({ 
       message: `Push to branch '${pushedBranchName}' ignored. Not in allowed list.`,
       project: projectName,
@@ -517,7 +629,7 @@ app.post('/', (req, res) => {
     });
   }
   
-  console.log(`Processing push to branch '${pushedBranchName}' for project '${projectName}'. Allowed branches: [${allowedBranches.join(', ')}].`);
+  console.log(`Processing ${eventType} to branch '${pushedBranchName}' for project '${projectName}' (commit: ${commitHash.substring(0,7)}, by: ${committerName}). Allowed branches: [${allowedBranches.join(', ')}].`);
 
   const scriptsFolder = path.join(__dirname, 'scripts');
 
@@ -527,7 +639,7 @@ app.post('/', (req, res) => {
 
   fs.readdir(scriptsFolder, (err, files) => {
     if (err) {
-      appendLog({ timestamp: new Date().toISOString(), status: 'SERVER_ERROR', projectName, branchName: pushedBranchName, message: 'Error reading scripts folder.', details: { error: err.message } });
+      appendLog({ timestamp: new Date().toISOString(), status: 'SERVER_ERROR', projectName, branchName: pushedBranchName, committer: committerName, commitHash, eventType, message: 'Error reading scripts folder.', details: { error: err.message } });
       res.status(500).send({ error: 'Internal Server Error' });
       return;
     }
@@ -535,7 +647,7 @@ app.post('/', (req, res) => {
     const scriptPath = files.find(file => file.startsWith(projectName));
 
     if (!scriptPath) {
-      appendLog({ timestamp: new Date().toISOString(), status: 'NOT_FOUND', projectName, branchName: pushedBranchName, message: 'Script not found for project.' });
+      appendLog({ timestamp: new Date().toISOString(), status: 'NOT_FOUND', projectName, branchName: pushedBranchName, committer: committerName, commitHash, eventType, message: 'Script not found for project.' });
       res.status(404).send({ error: 'Script not found' });
       return;
     }
@@ -549,21 +661,21 @@ app.post('/', (req, res) => {
 
     if (!hostUser || !scriptsPath) {
       console.error('Error: HOST_USER or SCRIPTS_PATH are not configured as environment variables for the container.');
-      appendLog({ timestamp: new Date().toISOString(), status: 'CONFIGURATION_ERROR', projectName, branchName: pushedBranchName, message: 'HOST_USER or SCRIPTS_PATH are not configured for the container.' });
+      appendLog({ timestamp: new Date().toISOString(), status: 'CONFIGURATION_ERROR', projectName, branchName: pushedBranchName, committer: committerName, commitHash, eventType, message: 'HOST_USER or SCRIPTS_PATH are not configured for the container.' });
       return res.status(500).send({ error: 'Server configuration error: SSH host details missing.' });
     }
 
     const sshCommand = `ssh -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${hostUser}@172.17.0.1 "bash ${scriptPathOnHost} '${pushedBranchName}'"`;
 
-    console.log(`Attempting to execute on host via SSH: ${sshCommand}`);
-    appendLog({ timestamp: new Date().toISOString(), status: 'EXECUTION_ATTEMPT', projectName, branchName: pushedBranchName, message: `Attempting to execute ${scriptNameOnly} on host.`, details: { command: sshCommand } });
+    console.log(`Attempting to execute ${scriptNameOnly} on host via SSH for ${eventType} by ${committerName} (commit ${commitHash.substring(0,7)}) on branch ${pushedBranchName}: ${sshCommand}`);
+    appendLog({ timestamp: new Date().toISOString(), status: 'EXECUTION_ATTEMPT', projectName, branchName: pushedBranchName, committer: committerName, commitHash, eventType, message: `Attempting to execute ${scriptNameOnly} on host.`, details: { command: sshCommand } });
 
     exec(sshCommand, (error, stdout, stderr) => {
       if (error) {
         console.error(`Error executing script on host via SSH for ${scriptNameOnly}, branch ${pushedBranchName}:`, error);
         console.error(`SSH stderr: ${stderr}`);
         console.error(`SSH stdout: ${stdout}`);
-        appendLog({ timestamp: new Date().toISOString(), status: 'EXECUTION_FAILURE', projectName, branchName: pushedBranchName, message: `Error executing script ${scriptNameOnly} on host.`, details: { error: error.message, stderr, stdout } });
+        appendLog({ timestamp: new Date().toISOString(), status: 'EXECUTION_FAILURE', projectName, branchName: pushedBranchName, committer: committerName, commitHash, eventType, message: `Error executing script ${scriptNameOnly} on host.`, details: { error: error.message, stderr, stdout, commitMessage } });
         return res.status(500).send({ 
           error: 'Internal Server Error during remote script execution', 
           details: stderr || error.message,
@@ -571,11 +683,14 @@ app.post('/', (req, res) => {
         });
       }
       console.log(`Script ${scriptNameOnly} executed successfully on host for branch '${pushedBranchName}'. Stdout: ${stdout}`);
-      appendLog({ timestamp: new Date().toISOString(), status: 'EXECUTION_SUCCESS', projectName, branchName: pushedBranchName, message: `Script ${scriptNameOnly} executed successfully on host.`, details: { stdout } });
+      appendLog({ timestamp: new Date().toISOString(), status: 'EXECUTION_SUCCESS', projectName, branchName: pushedBranchName, committer: committerName, commitHash, eventType, message: `Script ${scriptNameOnly} executed successfully on host.`, details: { stdout, commitMessage } });
       res.status(200).send({
         message: 'Script executed successfully',
         project: projectName,
         branch: pushedBranchName,
+        eventType: eventType,
+        committer: committerName,
+        commitHash: commitHash,
         output: stdout
       });
     });

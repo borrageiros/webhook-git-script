@@ -13,15 +13,15 @@ This project provides a simple webhook server to automatically execute scripts w
 
 ## 🐳 Docker Deployment
 
-> **Pre-built images are available on Docker Hub:** > [borrageiros/webhook-git-server on Docker Hub](https://hub.docker.com/repository/docker/borrageiros/webhook-git-server/tags)
+> **Pre-built images are available on Docker Hub:** > [borrageiros/webhook-git-script on Docker Hub](https://hub.docker.com/repository/docker/borrageiros/webhook-git-script/tags)
 
 - `latest`: For amd64 distributions.
   ```
-  borrageiros/webhook-git-server:latest
+  borrageiros/webhook-git-script:latest
   ```
 - `arm64`: For arm64 distributions (e.g., Raspberry Pi).
   ```
-  borrageiros/webhook-git-server:arm64
+  borrageiros/webhook-git-script:arm64
   ```
 
 ### ⚙️ Docker Setup & Run
@@ -69,8 +69,8 @@ This project provides a simple webhook server to automatically execute scripts w
       # (Optional) Volume for persistent logs (maps host path to container's /usr/src/app/public)
       # Ensure logs.json exists in /path/to/your/host_logs_folder on the host.
       # -v /path/to/your/host_logs_folder/logs.json:/usr/src/app/public/logs.json \
-      --name webhook-git-server \
-      borrageiros/webhook-git-server:latest # Or :arm64 for ARM
+      --name webhook-git-script \
+      borrageiros/webhook-git-script:latest # Or :arm64 for ARM
     ```
     - Replace `"your_super_secret_string_here"` with a strong secret.
     - Replace `"your_username_on_host"` with the username on your host machine that the container will SSH into (e.g., `ubuntu`).
@@ -120,7 +120,7 @@ The server will start, by default on port 3000, unless specified otherwise by th
 
 ### 📝 Viewing Logs
 
-Navigate to `http://your-server-ip-or-domain:PORT/` in your web browser. You will be prompted to enter the `GIT_SECRET` to view the execution logs. The interface displays the last 100 log entries.
+Navigate to `http://your-script-ip-or-domain:PORT/` in your web browser. You will be prompted to enter the `GIT_SECRET` to view the execution logs. The interface displays the last 100 log entries.
 
 ### ➕ 1. Adding a New Project Script
 
@@ -129,7 +129,7 @@ This command generates a shell script in the `scripts/` directory that will be e
 - **If using Docker:**
 
   ```bash
-  docker exec -it webhook-git-server yarn add-proyect <repository_url> <project_path_on_server_INSIDE_HOST>
+  docker exec -it webhook-git-script yarn add-proyect <repository_url> <project_path_on_server_INSIDE_HOST>
   ```
 
   - `<repository_url>`: The SSH or HTTPS URL of the Git repository (e.g., `git@github.com:user/repo.git`).
@@ -159,10 +159,10 @@ yarn add-proyect https://github.com/your-name/your-repo /home/user/projects/your
 
 2.  **Configure Payload URL:**
 
-    - `http://your-server-ip-or-domain:PORT/`
+    - `http://your-script-ip-or-domain:PORT/`
     - **Branch Filtering (Optional):** You can control which branches trigger script execution by adding `refs` query parameters to the URL. The script will only run if the pushed branch matches one of the provided `refs`.
-      - For a single branch: `http://your-server-ip-or-domain:PORT/?refs=main`
-      - For multiple branches: `http://your-server-ip-or-domain:PORT/?refs=main&refs=develop&refs=release`
+      - For a single branch: `http://your-script-ip-or-domain:PORT/?refs=main`
+      - For multiple branches: `http://your-script-ip-or-domain:PORT/?refs=main&refs=develop&refs=release`
     - If no `refs` parameters are provided, the script will be triggered for pushes to _any_ branch (default behavior).
     - Replace `PORT` with the port your application is listening on (e.g., 3000).
 
