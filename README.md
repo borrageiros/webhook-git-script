@@ -8,6 +8,7 @@ This project provides a simple webhook server to automatically execute scripts w
 - **🔌 Webhook Endpoint**: A simple Express server listens for POST requests to trigger these scripts.
 - **🔒 Secure**: Verifies webhook signatures to ensure requests are genuine.
 - **🔧 Configurable**: Uses environment variables for port and secret configuration.
+- **📝 Log Viewer**: Access a web interface at `/` to view the last 100 execution logs. Access is protected by the `GIT_SECRET`.
 - **🐳 Dockerized**: Easy to deploy with Docker, with images available on Docker Hub.
 
 ## 🐳 Docker Deployment
@@ -25,25 +26,31 @@ This project provides a simple webhook server to automatically execute scripts w
 
 ### ⚙️ Docker Setup & Run
 
-1.  **(Recommended) Create a persistent volume for scripts on your HOST machine:**
-    This ensures your generated scripts (which are created by `add-proyect` inside the container but point to host paths for execution) are stored where the SSH command from the container can find them on the host.
+1.  **(Recommended) Create persistent volumes on your HOST machine:**
 
-    ```bash
-    mkdir -p /path/to/your/host_scripts_folder
-    ```
-
-    Replace `/path/to/your/host_scripts_folder` with your desired absolute path on the host (e.g., `/home/ubuntu/webhook_scripts`).
+    - **For Scripts:** This ensures your generated scripts are stored where the SSH command from the container can find them on the host.
+      ```bash
+      mkdir -p /path/to/your/host_scripts_folder
+      ```
+      Replace `/path/to/your/host_scripts_folder` with your desired absolute path (e.g., `/home/ubuntu/webhook_scripts`).
+    - **(Optional) For Logs:** To persist execution logs across container restarts, create a directory for the log file.
+      ```bash
+      mkdir -p /path/to/your/host_logs_folder
+      touch /path/to/your/host_logs_folder/logs.json # Ensure the file exists
+      chmod 666 /path/to/your/host_logs_folder/logs.json # Make it writable by the container user
+      ```
+      Replace `/path/to/your/host_logs_folder` with your desired absolute path (e.g., `/home/ubuntu/webhook_logs`).
 
 2.  **Prepare SSH Key for Container-to-Host Communication:**
 
     - On your **host machine**, generate a dedicated SSH key pair. This key will allow the Docker container to SSH into your host to execute scripts.
       ```bash
-      ssh-keygen -t ed25519 -f ~/.ssh/webhook_container_to_host_key -N ""
+      ssh-keygen -t ed25519 -N ""
       ```
-      (This creates `~/.ssh/webhook_container_to_host_key` and `~/.ssh/webhook_container_to_host_key.pub`)
+      (This creates `~/.ssh/id_rsa` and `~/.ssh/id_rsa.pub`)
     - Authorize this new public key on your host by adding its content to your user's `authorized_keys` file:
       ```bash
-      cat ~/.ssh/webhook_container_to_host_key.pub >> ~/.ssh/authorized_keys
+      cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
       ```
     - **Security Note:** For enhanced security, consider restricting the commands this specific SSH key can execute on the host. (See [Important Notes](#️-important-notes) section below).
 
@@ -55,12 +62,13 @@ This project provides a simple webhook server to automatically execute scripts w
       -e GIT_SECRET="your_super_secret_string_here" \
       -e PORT="3000" \ # Port the app inside container listens on.
       -e HOST_USER="your_username_on_host" \ # e.g., ubuntu
-      -e SCRIPTS_PATH="/path/to/your/host_scripts_folder" \ # Must match the host path created in step 1
+      -e SCRIPTS_PATH="/path/to/your/host_scripts_folder" \ # Must match the host path created in step 1 for scripts
       -v ~/.ssh:/root/.ssh:ro \ # Mount the private SSH key for host access (this needs permissions over the git repos too)
-      # The following volume mounts the container's internal /usr/src/app/scripts to the host path.
-      # This is where create-script.js (run via docker exec) will place newly generated .sh files.
-      # The SSH command will then execute them from this same path on the host.
+      # Volume for scripts (maps host path to container's /usr/src/app/scripts)
       -v /path/to/your/host_scripts_folder:/usr/src/app/scripts \
+      # (Optional) Volume for persistent logs (maps host path to container's /usr/src/app/public)
+      # Ensure logs.json exists in /path/to/your/host_logs_folder on the host.
+      # -v /path/to/your/host_logs_folder/logs.json:/usr/src/app/public/logs.json \
       --name webhook-git-server \
       borrageiros/webhook-git-server:latest # Or :arm64 for ARM
     ```
@@ -68,6 +76,7 @@ This project provides a simple webhook server to automatically execute scripts w
     - Replace `"your_username_on_host"` with the username on your host machine that the container will SSH into (e.g., `ubuntu`).
     - Set `SCRIPTS_PATH` to the **absolute path** you created in step 1 (e.g., `/home/ubuntu/webhook_scripts`). This variable tells `app.js` where to find the scripts on the host when constructing the SSH command.
     - The `-v /path/to/your/host_scripts_folder:/usr/src/app/scripts` volume mount is crucial. It ensures that when `create-script.js` (run via `docker exec ... yarn add-proyect ...`) writes a script to `/usr/src/app/scripts` _inside the container_, that script also appears at `/path/to/your/host_scripts_folder` _on the host_. This is the path from which the SSH command will execute it.
+    - **(Optional) For persistent logs**: If you want to persist logs, uncomment the line `-v /path/to/your/host_logs_folder/logs.json:/usr/src/app/public/logs.json` and ensure you have created the `logs.json` file in the host directory `/path/to/your/host_logs_folder` and given it appropriate write permissions (e.g., `chmod 666 /path/to/your/host_logs_folder/logs.json`). The application saves the last 100 log entries.
     - The `PORT` variable now defines the port the Node.js app _tries_ to listen on. With `--network host`, if you set `PORT=3000`, the application will be accessible directly on port 3000 of your host machine. You wouldn't need `-p 3000:3000` in this mode (it might even cause errors).
 
 ## 💻 Manual Node.js Installation & Usage
@@ -97,6 +106,7 @@ This project provides a simple webhook server to automatically execute scripts w
     GIT_SECRET=your_super_secret_string_here
     ```
     - Replace `your_super_secret_string_here` (see [Generating a Secure Secret](#generating-a-secure-secret)).
+    - The log file will be created as `public/logs.json` relative to the project root.
 
 ### ▶️ Running the Server
 
@@ -107,6 +117,10 @@ yarn start
 The server will start, by default on port 3000, unless specified otherwise by the `PORT` environment variable.
 
 ## 🛠️ Usage
+
+### 📝 Viewing Logs
+
+Navigate to `http://your-server-ip-or-domain:PORT/` in your web browser. You will be prompted to enter the `GIT_SECRET` to view the execution logs. The interface displays the last 100 log entries.
 
 ### ➕ 1. Adding a New Project Script
 

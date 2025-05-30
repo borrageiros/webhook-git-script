@@ -1,11 +1,11 @@
 {
   "name": "webhook-git-script",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "app.js",
   "license": "MIT",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js",
+    "start": "node app.js",
+    "dev": "nodemon app.js",
     "add-proyect": "node create-script.js"
   },
   "dependencies": {
