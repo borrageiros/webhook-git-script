@@ -11,18 +11,6 @@ async function main() {
     process.exit(1);
   }
 
-  try {
-    const fetch = (await import('node-fetch')).default;
-    const response = await fetch(repoUrl);
-    if (!response.ok) {
-      console.error(`Error: Repository not found or not accessible (status: ${response.status})`);
-      process.exit(1);
-    }
-  } catch (error) {
-    console.error(`Error: Could not access repository URL: ${error.message}`);
-    process.exit(1);
-  }
-
   const scriptsFolder = path.join(__dirname, 'scripts');
   if (!fs.existsSync(scriptsFolder)) {
     fs.mkdirSync(scriptsFolder, { recursive: true });
